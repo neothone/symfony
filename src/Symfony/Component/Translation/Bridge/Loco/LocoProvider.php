@@ -104,6 +104,7 @@ final class LocoProvider implements ProviderInterface
                 $previousCatalogue = $this->translatorBag?->getCatalogue($locale);
 
                 // Loco forbids concurrent requests, so the requests must be synchronous in order to prevent "429 Too Many Requests" errors.
+                usleep(200000);; // Loco API rate limit: 5 requests per second
                 $response = $this->client->request('GET', \sprintf('export/locale/%s.xlf', rawurlencode($locale)), [
                     'query' => [
                         'filter' => '*' !== $domain ? $domain : '',
@@ -183,6 +184,7 @@ final class LocoProvider implements ProviderInterface
 
         foreach (array_keys($catalogue->all()) as $domain) {
             foreach ($this->getAssetsIds($domain) as $id) {
+                usleep(200000);; // Loco API rate limit: 5 requests per second
                 $responses[$id] = $this->client->request('DELETE', \sprintf('assets/%s.json', rawurlencode($id)));
             }
         }
@@ -207,6 +209,7 @@ final class LocoProvider implements ProviderInterface
      */
     private function getAssetsIds(string $domain): array
     {
+        usleep(200000);; // Loco API rate limit: 5 requests per second
         $response = $this->client->request('GET', 'assets', ['query' => ['filter' => $domain]]);
 
         if (200 !== $statusCode = $response->getStatusCode()) {
@@ -225,6 +228,8 @@ final class LocoProvider implements ProviderInterface
         $responses = $createdIds = [];
 
         foreach ($keys as $key) {
+            usleep(200000);; // Loco API rate limit: 5 requests per second
+
             $responses[$key] = $this->client->request('POST', 'assets', [
                 'body' => [
                     'id' => $domain.'__'.$key, // must be globally unique, not only per domain
@@ -233,17 +238,15 @@ final class LocoProvider implements ProviderInterface
                     'default' => 'untranslated',
                 ],
             ]);
-        }
 
-        foreach ($responses as $key => $response) {
-            if (201 !== $statusCode = $response->getStatusCode()) {
-                $this->logger->error(\sprintf('Unable to add new translation key "%s" to Loco: (status code: "%s") "%s".', $key, $statusCode, $response->getContent(false)));
+            if (201 !== $statusCode = $responses[$key]->getStatusCode()) {
+                $this->logger->error(\sprintf('Create asset : Unable to add new translation key "%s" to Loco: (status code: "%s") "%s".', $key, $statusCode, $responses[$key]->getContent(false)));
 
                 if (500 <= $statusCode) {
-                    throw new ProviderException(\sprintf('Unable to add new translation key "%s" to Loco: (status code: "%s").', $key, $statusCode), $response);
+                    throw new ProviderException(\sprintf('Create asset 500+ Error : Unable to add new translation key "%s" to Loco: (status code: "%s").', $key, $statusCode), $responses[$key]);
                 }
             } else {
-                $createdIds[] = $response->toArray(false)['id'];
+                $createdIds[] = $responses[$key]->toArray(false)['id'];
             }
         }
 
@@ -255,18 +258,18 @@ final class LocoProvider implements ProviderInterface
         $responses = [];
 
         foreach ($translations as $id => $message) {
+            usleep(200000);; // Loco API rate limit: 5 requests per second
+
             $responses[$id] = $this->client->request('POST', \sprintf('translations/%s/%s', rawurlencode($id), rawurlencode($locale)), [
                 'body' => $message,
                 'headers' => ['Content-Type' => 'text/plain'],
             ]);
-        }
 
-        foreach ($responses as $id => $response) {
-            if (200 !== $statusCode = $response->getStatusCode()) {
-                $this->logger->error(\sprintf('Unable to add translation for key "%s" in locale "%s" to Loco: "%s".', $id, $locale, $response->getContent(false)));
+            if (200 !== $statusCode = $responses[$id]->getStatusCode()) {
+                $this->logger->error(\sprintf('Unable to add translation for key "%s" in locale "%s" to Loco: (status code: "%s") "%s".', $id, $locale, $statusCode, $responses[$id]->getContent(false)));
 
                 if (500 <= $statusCode) {
-                    throw new ProviderException(\sprintf('Unable to add translation for key "%s" in locale "%s" to Loco.', $id, $locale), $response);
+                    throw new ProviderException(\sprintf('Unable to add translation for key "%s" in locale "%s" to Loco.', $id, $locale), $responses[$id]);
                 }
             }
         }
@@ -290,6 +293,7 @@ final class LocoProvider implements ProviderInterface
 
         if ([] !== $idsWithoutComma) {
             // Set tags for all ids without comma.
+            usleep(200000); // Loco API rate limit: 5 requests per second
             $response = $this->client->request('POST', \sprintf('tags/%s.json', rawurlencode($tag)), [
                 'body' => implode(',', $idsWithoutComma),
             ]);
@@ -305,6 +309,7 @@ final class LocoProvider implements ProviderInterface
 
         // Set tags for each id with comma one by one.
         foreach ($idsWithComma as $id) {
+            usleep(200000);; // Loco API rate limit: 5 requests per second
             $response = $this->client->request('POST', \sprintf('assets/%s/tags', rawurlencode($id)), [
                 'body' => ['name' => $tag],
             ]);
@@ -321,6 +326,7 @@ final class LocoProvider implements ProviderInterface
 
     private function createTag(string $tag): void
     {
+        usleep(200000);; // Loco API rate limit: 5 requests per second
         $response = $this->client->request('POST', 'tags.json', [
             'body' => [
                 'name' => $tag,
@@ -338,6 +344,7 @@ final class LocoProvider implements ProviderInterface
 
     private function getTags(): array
     {
+        usleep(200000);; // Loco API rate limit: 5 requests per second
         $response = $this->client->request('GET', 'tags.json');
         $content = $response->toArray(false);
 
@@ -350,6 +357,7 @@ final class LocoProvider implements ProviderInterface
 
     private function createLocale(string $locale): void
     {
+        usleep(200000);; // Loco API rate limit: 5 requests per second
         $response = $this->client->request('POST', 'locales', [
             'body' => [
                 'code' => $locale,
@@ -367,6 +375,7 @@ final class LocoProvider implements ProviderInterface
 
     private function getLocales(): array
     {
+        usleep(200000);; // Loco API rate limit: 5 requests per second
         $response = $this->client->request('GET', 'locales');
         $content = $response->toArray(false);
 
