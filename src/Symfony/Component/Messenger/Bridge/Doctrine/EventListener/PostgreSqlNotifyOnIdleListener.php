@@ -12,6 +12,8 @@
 namespace Symfony\Component\Messenger\Bridge\Doctrine\EventListener;
 
 use Doctrine\DBAL\ArrayParameterType;
+use Doctrine\DBAL\Exception as DBALException;
+use Doctrine\DBAL\Exception\ConnectionLost;
 use Doctrine\DBAL\Types\Types;
 use Psr\Clock\ClockInterface;
 use Psr\Log\LoggerInterface;
@@ -109,22 +111,31 @@ class PostgreSqlNotifyOnIdleListener implements EventSubscriberInterface
             }
         }
 
-        // Cap by earliest delayed message across all PG queues: wake up in time to process it
-        if (null !== $earliest = $this->getEarliestDelayedMessageTime()) {
-            $msUntilEarliest = (self::toTimestamp($earliest) - $now) * 1000;
-            if (0 >= $timeout = min($timeout, $msUntilEarliest)) {
+        try {
+            // Cap by earliest delayed message across all PG queues: wake up in time to process it
+            if (null !== $earliest = $this->getEarliestDelayedMessageTime()) {
+                $msUntilEarliest = (self::toTimestamp($earliest) - $now) * 1000;
+                if (0 >= $timeout = min($timeout, $msUntilEarliest)) {
+                    return;
+                }
+            }
+
+            // Cap by sleep duration when non-PG transports are present to ensure they are still polled regularly
+            if (0 >= $timeout = (int) min($timeout, $this->sleepCapMs ?? $timeout)) {
                 return;
             }
+
+            $this->logger?->debug('Worker waiting for PostgreSQL LISTEN/NOTIFY wake-up.', ['timeout_ms' => $timeout]);
+
+            $this->activeConnection->waitForNotify($timeout);
+        } catch (DBALException $e) {
+            if (!$this->activeConnection->closeIfDisconnected() && !$e instanceof ConnectionLost) {
+                throw $e;
+            }
+
+            // The worker then polls its receivers, and DoctrineReceiver throws when the outage lasts too long
+            $this->logger?->warning('Worker cannot wait for PostgreSQL LISTEN/NOTIFY wake-up, the database connection is lost: {error}', ['error' => $e->getMessage(), 'exception' => $e]);
         }
-
-        // Cap by sleep duration when non-PG transports are present to ensure they are still polled regularly
-        if (0 >= $timeout = (int) min($timeout, $this->sleepCapMs ?? $timeout)) {
-            return;
-        }
-
-        $this->logger?->debug('Worker waiting for PostgreSQL LISTEN/NOTIFY wake-up.', ['timeout_ms' => $timeout]);
-
-        $this->activeConnection->waitForNotify($timeout);
     }
 
     public static function getSubscribedEvents(): array

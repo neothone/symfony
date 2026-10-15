@@ -12,6 +12,7 @@
 namespace Symfony\Component\Messenger\Bridge\Doctrine\Transport;
 
 use Doctrine\DBAL\Exception as DBALException;
+use Doctrine\DBAL\Exception\ConnectionLost;
 use Doctrine\DBAL\Exception\RetryableException;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Exception\LogicException;
@@ -30,7 +31,10 @@ use Symfony\Component\Messenger\Transport\Serialization\SerializerInterface;
 class DoctrineReceiver implements ListableReceiverInterface, MessageCountAwareInterface, KeepaliveReceiverInterface
 {
     private const MAX_RETRIES = 3;
+    // How long, in seconds, a lost connection is waited for before the error is surfaced
+    private const RECONNECT_TIMEOUT = 60;
     private int $retryingSafetyCounter = 0;
+    private ?float $disconnectedSince = null;
     private SerializerInterface $serializer;
 
     public function __construct(
@@ -56,6 +60,7 @@ class DoctrineReceiver implements ListableReceiverInterface, MessageCountAwareIn
         try {
             $doctrineEnvelopes = $this->connection->get($fetchSize);
             $this->retryingSafetyCounter = 0; // reset counter
+            $this->disconnectedSince = null;
         } catch (RetryableException $exception) {
             // Do nothing when RetryableException occurs less than "MAX_RETRIES"
             // as it will likely be resolved on the next call to get()
@@ -67,7 +72,20 @@ class DoctrineReceiver implements ListableReceiverInterface, MessageCountAwareIn
 
             return [];
         } catch (DBALException $exception) {
-            throw new TransportException($exception->getMessage(), 0, $exception);
+            if (!$this->isConnectionLost($exception)) {
+                throw new TransportException($exception->getMessage(), 0, $exception);
+            }
+
+            // The database went away: report nothing to consume and let the worker poll again after its usual sleep, on a fresh connection.
+            // Blocking here would starve the other receivers of the worker. Only an outage that outlasts the timeout is surfaced.
+            $this->disconnectedSince ??= microtime(true);
+            if (microtime(true) - $this->disconnectedSince >= self::RECONNECT_TIMEOUT) {
+                $this->disconnectedSince = null;
+
+                throw new TransportException($exception->getMessage(), 0, $exception);
+            }
+
+            return [];
         } finally {
             if ($asyncSignals) {
                 pcntl_async_signals(true);
@@ -169,6 +187,7 @@ class DoctrineReceiver implements ListableReceiverInterface, MessageCountAwareIn
         $multiplier = 2;
         $jitter = 0.1;
         $retries = 0;
+        $reconnected = false;
 
         retry:
         try {
@@ -186,8 +205,47 @@ class DoctrineReceiver implements ListableReceiverInterface, MessageCountAwareIn
             }
 
             throw new TransportException($exception->getMessage(), 0, $exception);
-        } catch (DBALException $exception) {
-            throw new TransportException($exception->getMessage(), 0, $exception);
+        } catch (DBALException|TransportException $exception) {
+            // Connection::ack() and reject() already wrap DBAL errors in a TransportException
+            $dbalException = $exception instanceof TransportException ? $exception->getPrevious() : $exception;
+
+            // The message has been handled: losing its acknowledgement to a database restart would get it redelivered and handled twice
+            if (!$reconnected && $dbalException instanceof DBALException && $this->waitForReconnection($dbalException)) {
+                $reconnected = true;
+
+                goto retry;
+            }
+
+            throw $exception instanceof TransportException ? $exception : new TransportException($exception->getMessage(), 0, $exception);
         }
+    }
+
+    /**
+     * Whether the failure comes from a connection the database no longer serves.
+     *
+     * DBAL closes the connection by itself on a ConnectionLost, so the probe can succeed on a fresh connection.
+     */
+    private function isConnectionLost(DBALException $exception): bool
+    {
+        return $this->connection->closeIfDisconnected() || $exception instanceof ConnectionLost;
+    }
+
+    /**
+     * Waits for the database to come back, up to the timeout, and tells whether the failed call can be replayed.
+     */
+    private function waitForReconnection(DBALException $exception): bool
+    {
+        $deadline = microtime(true) + self::RECONNECT_TIMEOUT;
+
+        for ($attempts = 0; $this->connection->closeIfDisconnected(); ++$attempts) {
+            if (microtime(true) >= $deadline) {
+                return false;
+            }
+
+            sleep(1);
+        }
+
+        // The database answered at once: replay the call only if DBAL already closed the lost connection
+        return 0 < $attempts || $exception instanceof ConnectionLost;
     }
 }

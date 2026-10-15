@@ -6,6 +6,7 @@ CHANGELOG
 
  * Make `DoctrineSender` and `DoctrineTransport` implement `BatchSenderInterface`, inserting several messages per statement
  * Add `DoctrineInbox` to record the handled messages in a database table
+ * Make `DoctrineReceiver` wait up to 60 seconds for a lost database connection to come back instead of stopping the worker
 
 8.1
 ---

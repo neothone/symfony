@@ -20,7 +20,10 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Bridge\Doctrine\Tests\Fixtures\DummyMessage;
+use Symfony\Component\Messenger\Bridge\Doctrine\Transport\DoctrineReceiver;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\PostgreSqlConnection;
+use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Transport\Serialization\PhpSerializer;
 
 #[RequiresPhpExtension('pdo_pgsql')]
 #[Group('integration')]
@@ -72,6 +75,23 @@ class DoctrinePostgreSqlIntegrationTest extends TestCase
         $this->assertSame(['a', 'b'], array_keys($ids));
         $this->assertSame($ids['a'], (string) $this->connection->get()[0]['id']);
         $this->assertSame($ids['b'], (string) $this->connection->get()[0]['id']);
+    }
+
+    public function testReceiverSurvivesATerminatedConnection()
+    {
+        $receiver = new DoctrineReceiver($this->connection, $serializer = new PhpSerializer());
+        $encoded = $serializer->encode(new Envelope(new DummyMessage('Hi')));
+        $this->connection->send($encoded['body'], $encoded['headers'] ?? []);
+
+        $admin = DriverManager::getConnection($this->driverConnection->getParams(), $this->driverConnection->getConfiguration());
+        $admin->executeQuery('SELECT pg_terminate_backend(?)', [$this->driverConnection->fetchOne('SELECT pg_backend_pid()')]);
+        $admin->close();
+
+        $this->assertSame([], $receiver->get());
+
+        $envelopes = $receiver->get();
+        $this->assertCount(1, $envelopes);
+        $this->assertEquals(new DummyMessage('Hi'), $envelopes[0]->getMessage());
     }
 
     public function testSkipLocked()

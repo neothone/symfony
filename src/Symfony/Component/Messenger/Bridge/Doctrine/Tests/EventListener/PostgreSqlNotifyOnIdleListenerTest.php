@@ -13,12 +13,16 @@ namespace Symfony\Component\Messenger\Bridge\Doctrine\Tests\EventListener;
 
 use Doctrine\DBAL\Configuration;
 use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Driver\PDO\Exception as PDODriverException;
 use Doctrine\DBAL\Driver\Result as DriverResult;
+use Doctrine\DBAL\Exception\ConnectionException;
+use Doctrine\DBAL\Exception\DriverException;
 use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Query\QueryBuilder;
 use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Types\Type;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\Clock\MockClock;
 use Symfony\Component\Messenger\Bridge\Doctrine\EventListener\PostgreSqlNotifyOnIdleListener;
 use Symfony\Component\Messenger\Bridge\Doctrine\Transport\PostgreSqlConnection;
@@ -395,5 +399,48 @@ class PostgreSqlNotifyOnIdleListenerTest extends TestCase
         $this->assertCount(1, $capturedTimeouts);
         // Without sleep cap, the full 60000ms config timeout should be used
         $this->assertSame(60000, $capturedTimeouts[0]);
+    }
+
+    public function testNoWaitWhenTheDatabaseIsUnreachable()
+    {
+        $driverConnection = $this->createMock(Connection::class);
+        $driverConnection->method('executeStatement')->willReturn(1);
+        $driverConnection->method('getDatabasePlatform')->willReturn(new PostgreSQLPlatform());
+        $driverConnection->method('executeQuery')->willThrowException(new ConnectionException(PDODriverException::new(new \PDOException('SQLSTATE[08006] [7] connection to server failed: Connection refused')), null));
+        $driverConnection->expects($this->once())->method('close');
+        $driverConnection->expects($this->never())->method('getNativeConnection');
+
+        $logger = $this->createMock(LoggerInterface::class);
+        $logger->expects($this->once())->method('warning');
+
+        $listener = new PostgreSqlNotifyOnIdleListener($logger);
+        $listener->addConnection('async', new PostgreSqlConnection(['table_name' => 'queue_table'], $driverConnection));
+
+        $worker = $this->createWorkerWithTransports(['async']);
+        $listener->onWorkerStarted(new WorkerStartedEvent($worker));
+        $listener->onWorkerRunning(new WorkerRunningEvent($worker, true));
+    }
+
+    public function testErrorsOtherThanALostConnectionAreThrown()
+    {
+        $driverConnection = $this->createStub(Connection::class);
+        $driverConnection->method('executeStatement')->willReturn(1);
+        $driverConnection->method('getDatabasePlatform')->willReturn(new PostgreSQLPlatform());
+        $driverConnection->method('executeQuery')->willReturnCallback(function (string $sql) use ($driverConnection) {
+            if ('SELECT 1' !== $sql) {
+                throw new DriverException(PDODriverException::new(new \PDOException('SQLSTATE[42703]: Undefined column: 7 ERROR:  column "available_at" does not exist')), null);
+            }
+
+            return new Result($this->createStub(DriverResult::class), $driverConnection);
+        });
+
+        $listener = new PostgreSqlNotifyOnIdleListener();
+        $listener->addConnection('async', new PostgreSqlConnection(['table_name' => 'queue_table'], $driverConnection));
+
+        $worker = $this->createWorkerWithTransports(['async']);
+        $listener->onWorkerStarted(new WorkerStartedEvent($worker));
+
+        $this->expectException(DriverException::class);
+        $listener->onWorkerRunning(new WorkerRunningEvent($worker, true));
     }
 }
